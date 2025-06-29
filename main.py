@@ -175,11 +175,8 @@ def generate_random_question(chat_id):
                 "Error"
             ]
 
-        # Randomly pick 3 or 4 participants (but not more than available)
-        max_options = min(len(participant_names), 4)
-        members_count = (
-            random.choice([3, max_options]) if max_options >= 4 else max_options
-        )
+        # Randomly pick 3 to 8 participants (but not more than available)
+        members_count = random.randint(3, min(6, len(participant_names)))
         selected_members = random.sample(participant_names, members_count)
 
         question = template["question"]
