@@ -1,6 +1,8 @@
 import logging
 import random
 import os
+import asyncio
+from datetime import time
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 from telegram import Update
@@ -9,6 +11,8 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
+from telegram.error import TelegramError
+import pytz
 
 # Enable logging
 logging.basicConfig(
@@ -27,6 +31,9 @@ DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_bot")
 QUESTIONS_COLLECTION = "question_templates"
 PARTICIPANTS_COLLECTION = "participants"
 
+# Timezone configuration
+PARIS_TZ = pytz.timezone("Europe/Paris")
+SCHEDULED_TIME = time(0, 0)  # 00:00
 
 # MongoDB connection
 mongo_client = None
@@ -157,6 +164,20 @@ def get_participants_count(chat_id):
         return 0
 
 
+def get_all_active_chats():
+    """Get all chat_ids that have participants"""
+    try:
+        if db is None:
+            return []
+
+        # Get distinct chat_ids from participants collection
+        chat_ids = db[PARTICIPANTS_COLLECTION].distinct("chat_id")
+        return chat_ids
+    except Exception as e:
+        logger.error(f"Error getting active chats: {e}")
+        return []
+
+
 def generate_random_question(chat_id):
     """Generate a random question with options for specific chat/group"""
     # Get a random question from database
@@ -198,6 +219,95 @@ def generate_random_question(chat_id):
     return question, options
 
 
+async def send_scheduled_question(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Send a scheduled question to a specific chat"""
+    try:
+        # Check if there are participants in this chat
+        participant_count = get_participants_count(chat_id)
+        if participant_count == 0:
+            logger.info(
+                f"No participants in chat {chat_id}, skipping scheduled question"
+            )
+            return
+
+        # Generate question and options
+        question, options = generate_random_question(chat_id)
+
+        # Check for errors
+        if options == ["Error"]:
+            logger.error(f"Error generating question for chat {chat_id}: {question}")
+            return
+
+        # Try to find Floooooood topic
+        flood_topic_id = 2082
+
+        # Prepare poll parameters
+        poll_params = {
+            "chat_id": chat_id,
+            "question": f"🌅 Daily Question!\n\n{question}",
+            "options": options,
+            "is_anonymous": False,
+            "allows_multiple_answers": True,
+        }
+
+        # Add message_thread_id if Floooooood topic exists
+        if flood_topic_id:
+            poll_params["message_thread_id"] = flood_topic_id
+            logger.info(
+                f"Sending scheduled question to Floooooood topic in chat {chat_id}"
+            )
+        else:
+            logger.info(f"Sending scheduled question to general chat {chat_id}")
+
+        # Send the poll
+        await context.bot.send_poll(**poll_params)
+        logger.info(f"Successfully sent scheduled question to chat {chat_id}")
+
+    except TelegramError as e:
+        logger.error(
+            f"Telegram error sending scheduled question to chat {chat_id}: {e}"
+        )
+    except Exception as e:
+        logger.error(f"Error sending scheduled question to chat {chat_id}: {e}")
+
+
+async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
+    """Job function to send daily questions to all active chats"""
+    logger.info("Running daily question job...")
+
+    # Get all active chats
+    active_chats = get_all_active_chats()
+
+    if not active_chats:
+        logger.info("No active chats found")
+        return
+
+    logger.info(f"Sending daily questions to {len(active_chats)} chats")
+
+    # Send questions to all active chats
+    for chat_id in active_chats:
+        await send_scheduled_question(context, chat_id)
+        # Small delay between messages to avoid rate limiting
+        await asyncio.sleep(1)
+
+    logger.info("Daily question job completed")
+
+
+async def schedule_daily_questions(application: Application):
+    """Schedule daily questions at 00:00 Paris time"""
+    job_queue = application.job_queue
+
+    # Schedule daily job at 00:00 Paris time
+    job_queue.run_daily(
+        daily_question_job,
+        time=SCHEDULED_TIME,
+        timezone=PARIS_TZ,
+        name="daily_questions",
+    )
+
+    logger.info(f"Scheduled daily questions at {SCHEDULED_TIME} Paris time")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a message when the command /start is issued."""
     user = update.effective_user
@@ -209,7 +319,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"To participate in the fun questions, use the command:\n"
         f"/participate\n\n"
         f"Then use /question to get a random question about group members!\n"
-        f"Use /participants to see who's participating."
+        f"Use /participants to see who's participating.\n\n"
+        f"🌅 I'll also send a daily question every day at 00:00 Paris time automatically!"
     )
 
 
@@ -223,7 +334,8 @@ async def participate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if add_participant(user.id, chat_id, username):
             await update.message.reply_text(
                 f"🎊 Great! {user.first_name} is now participating! 🎊\n"
-                f"You can now answer questions. Use /question to get started!"
+                f"You can now answer questions. Use /question to get started!\n"
+                f"Daily questions will be sent automatically at 00:00 Paris time! 🌅"
             )
         else:
             await update.message.reply_text(
@@ -302,7 +414,8 @@ async def show_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"👥 Total participants in this group: {participant_count}\n\n"
-        f"Keep the fun going with /question!"
+        f"Keep the fun going with /question!\n"
+        f"🌅 Daily questions are sent automatically at 00:00 Paris time!"
     )
 
 
@@ -318,6 +431,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /participants - See how many people are participating
 /help - Show this help message
 
+🌅 *Automatic Daily Questions*
+I'll send a daily question every day at 00:00 Paris time to all groups with participants!
+
 *Have fun voting on questions about your group members!* 🎉
     """
     await update.message.reply_text(help_text, parse_mode="Markdown")
@@ -330,7 +446,7 @@ def main():
         logger.error("Failed to connect to MongoDB. Exiting...")
         return
 
-    logger.info("Bot starting with MongoDB integration")
+    logger.info("Bot starting with MongoDB integration and scheduled questions")
 
     # Create the Application
     application = Application.builder().token(BOT_TOKEN).build()
@@ -340,8 +456,11 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("participate", participate))
     application.add_handler(CommandHandler("unparticipate", unparticipate))
-    application.add_handler(CommandHandler("question", ask_question))
+    # application.add_handler(CommandHandler("question", ask_question))
     application.add_handler(CommandHandler("participants", show_participants))
+
+    # Schedule daily questions
+    asyncio.create_task(schedule_daily_questions(application))
 
     # Run the bot until the user presses Ctrl-C
     try:
