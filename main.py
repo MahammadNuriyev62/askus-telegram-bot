@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 from telegram.error import TelegramError
 import pytz
+from telegram.ext import JobQueue
 
 # Enable logging
 logging.basicConfig(
@@ -293,19 +294,29 @@ async def daily_question_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Daily question job completed")
 
 
-async def schedule_daily_questions(application: Application):
-    """Schedule daily questions at 00:00 Paris time"""
+async def post_init(application: Application):
+    """Post-initialization hook to schedule daily questions"""
     job_queue = application.job_queue
+
+    if job_queue is None:
+        logger.error(
+            "JobQueue is not available. Please install python-telegram-bot[job-queue]"
+        )
+        return
+
+    # Create a time object with timezone info for Paris
+    import datetime as dt
+
+    paris_midnight = dt.time(0, 0, tzinfo=PARIS_TZ)
 
     # Schedule daily job at 00:00 Paris time
     job_queue.run_daily(
         daily_question_job,
-        time=SCHEDULED_TIME,
-        timezone=PARIS_TZ,
+        time=paris_midnight,
         name="daily_questions",
     )
 
-    logger.info(f"Scheduled daily questions at {SCHEDULED_TIME} Paris time")
+    logger.info(f"Scheduled daily questions at {paris_midnight} Paris time")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -372,6 +383,7 @@ async def unparticipate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a random question as a poll"""
+    return await update.message.reply_text("The feature is currently disabled.")
     user = update.effective_user
     chat_id = update.effective_chat.id
 
@@ -448,19 +460,18 @@ def main():
 
     logger.info("Bot starting with MongoDB integration and scheduled questions")
 
-    # Create the Application
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).job_queue(JobQueue()).build()
 
     # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("participate", participate))
     application.add_handler(CommandHandler("unparticipate", unparticipate))
-    # application.add_handler(CommandHandler("question", ask_question))
+    application.add_handler(CommandHandler("question", ask_question))
     application.add_handler(CommandHandler("participants", show_participants))
 
-    # Schedule daily questions
-    asyncio.create_task(schedule_daily_questions(application))
+    # Set up post-initialization hook to schedule daily questions
+    application.post_init = post_init
 
     # Run the bot until the user presses Ctrl-C
     try:
