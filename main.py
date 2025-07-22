@@ -251,18 +251,46 @@ async def send_scheduled_question(context: ContextTypes.DEFAULT_TYPE, chat_id: i
             "allows_multiple_answers": True,
         }
 
-        # Add message_thread_id if Floooooood topic exists
-        if flood_topic_id:
+        # First, try to send to the specific topic
+        try:
             poll_params["message_thread_id"] = flood_topic_id
             logger.info(
-                f"Sending scheduled question to Floooooood topic in chat {chat_id}"
+                f"Attempting to send scheduled question to Floooooood topic {flood_topic_id} in chat {chat_id}"
             )
-        else:
-            logger.info(f"Sending scheduled question to general chat {chat_id}")
 
-        # Send the poll
-        await context.bot.send_poll(**poll_params)
-        logger.info(f"Successfully sent scheduled question to chat {chat_id}")
+            await context.bot.send_poll(**poll_params)
+            logger.info(
+                f"Successfully sent scheduled question to Floooooood topic in chat {chat_id}"
+            )
+
+        except TelegramError as topic_error:
+            # Check if the error is related to topic not existing
+            error_message = str(topic_error).lower()
+            if any(
+                keyword in error_message
+                for keyword in [
+                    "message thread not found",
+                    "thread not found",
+                    "topic not found",
+                    "bad request",
+                ]
+            ):
+                logger.warning(
+                    f"Floooooood topic {flood_topic_id} not found in chat {chat_id}, falling back to general chat"
+                )
+
+                # Remove the message_thread_id and try again in general chat
+                poll_params.pop("message_thread_id", None)
+
+                logger.info(f"Sending scheduled question to general chat {chat_id}")
+                await context.bot.send_poll(**poll_params)
+                logger.info(
+                    f"Successfully sent scheduled question to general chat {chat_id}"
+                )
+
+            else:
+                # Re-raise the error if it's not related to topic not existing
+                raise topic_error
 
     except TelegramError as e:
         logger.error(
