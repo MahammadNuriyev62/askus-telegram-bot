@@ -1,3 +1,4 @@
 .env
-write_questions_to_db.py
 nerd_bot.py
+questions.py
+__pycache__/
