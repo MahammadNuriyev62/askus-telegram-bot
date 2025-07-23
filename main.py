@@ -31,6 +31,7 @@ MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "telegram_bot")
 QUESTIONS_COLLECTION = "question_templates"
 PARTICIPANTS_COLLECTION = "participants"
+ASKED_QUESTIONS_COLLECTION = "asked_questions"
 
 # Timezone configuration
 PARIS_TZ = pytz.timezone("Europe/Paris")
@@ -57,25 +58,113 @@ def connect_to_mongodb():
         return False
 
 
-def get_random_question_from_db():
-    """Get a random question template from MongoDB"""
+def get_asked_question_hashes(chat_id):
+    """Get list of question hashes that have been asked in this chat"""
+    try:
+        if db is None:
+            logger.error("MongoDB database not initialized")
+            return []
+
+        asked_questions = db[ASKED_QUESTIONS_COLLECTION].find(
+            {"chat_id": chat_id}, {"question_hash": 1, "_id": 0}
+        )
+        hashes = [q["question_hash"] for q in asked_questions]
+        return hashes
+    except Exception as e:
+        logger.error(f"Error getting asked question hashes: {e}")
+        return []
+
+
+def mark_question_as_asked(chat_id, question_hash):
+    """Mark a question as asked in this chat"""
+    try:
+        if db is None:
+            return False
+
+        from datetime import datetime
+
+        # Use upsert to avoid duplicates
+        db[ASKED_QUESTIONS_COLLECTION].update_one(
+            {"chat_id": chat_id, "question_hash": question_hash},
+            {
+                "$set": {
+                    "chat_id": chat_id,
+                    "question_hash": question_hash,
+                    "asked_at": datetime.utcnow(),
+                }
+            },
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error marking question as asked: {e}")
+        return False
+
+
+def reset_asked_questions(chat_id):
+    """Reset all asked questions for a chat (used when all questions have been asked)"""
+    try:
+        if db is None:
+            return False
+
+        result = db[ASKED_QUESTIONS_COLLECTION].delete_many({"chat_id": chat_id})
+        logger.info(f"Reset {result.deleted_count} asked questions for chat {chat_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error resetting asked questions: {e}")
+        return False
+
+
+def get_random_question_from_db(chat_id):
+    """Get a random question template from MongoDB that hasn't been asked in this chat"""
     try:
         if db is None:
             logger.error("MongoDB database not initialized")
             return None
 
+        # Get list of already asked question hashes for this chat
+        asked_hashes = get_asked_question_hashes(chat_id)
+
+        # Build the query to exclude already asked questions
+        query = {}
+        if asked_hashes:
+            query["hash"] = {"$nin": asked_hashes}
+
         # Use MongoDB's $sample aggregation to get one random question
-        pipeline = [{"$sample": {"size": 1}}]
+        pipeline = [{"$match": query}, {"$sample": {"size": 1}}]
+
         questions = list(db[QUESTIONS_COLLECTION].aggregate(pipeline))
 
         if questions:
             question = questions[0]
-            # Remove MongoDB _id field
+            # Remove MongoDB _id field but keep the hash
             question.pop("_id", None)
             return question
         else:
-            logger.error("No questions found in database")
-            return None
+            # Check if we have any questions at all
+            total_questions = db[QUESTIONS_COLLECTION].count_documents({})
+            if total_questions == 0:
+                logger.error("No questions found in database")
+                return None
+            else:
+                # All questions have been asked, reset and try again
+                logger.info(
+                    f"All questions have been asked in chat {chat_id}, resetting..."
+                )
+                reset_asked_questions(chat_id)
+
+                # Try again with fresh slate
+                pipeline = [{"$sample": {"size": 1}}]
+                questions = list(db[QUESTIONS_COLLECTION].aggregate(pipeline))
+
+                if questions:
+                    question = questions[0]
+                    question.pop("_id", None)
+                    return question
+                else:
+                    logger.error("No questions found even after reset")
+                    return None
+
     except Exception as e:
         logger.error(f"Error getting random question from database: {e}")
         return None
@@ -181,21 +270,23 @@ def get_all_active_chats():
 
 def generate_random_question(chat_id):
     """Generate a random question with options for specific chat/group"""
-    # Get a random question from database
-    template = get_random_question_from_db()
+    # Get a random question from database that hasn't been asked yet
+    template = get_random_question_from_db(chat_id)
 
     if not template:
         logger.error("No questions available from database")
-        return "Sorry, no questions available!", ["Error"]
+        return "Sorry, no questions available!", ["Error"], None
 
     if template["type"] == "member_options":
         # Question with participant names as options
         participant_names = get_participants_names(chat_id)
 
         if len(participant_names) < 3:
-            return "Sorry, need at least 3 participants for this type of question!", [
-                "Error"
-            ]
+            return (
+                "Sorry, need at least 3 participants for this type of question!",
+                ["Error"],
+                None,
+            )
 
         # Randomly pick 3 to 8 participants (but not more than available)
         members_count = random.randint(3, min(6, len(participant_names)))
@@ -208,16 +299,20 @@ def generate_random_question(chat_id):
         participant_names = get_participants_names(chat_id)
 
         if not participant_names:
-            return "Sorry, no participants available for this question!", ["Error"]
+            return (
+                "Sorry, no participants available for this question!",
+                ["Error"],
+                None,
+            )
 
         member = random.choice(participant_names)
         question = template["question"].format(member=member)
         options = template["options"]
     else:
         logger.error(f"Unknown question type: {template['type']}")
-        return "Sorry, invalid question type!", ["Error"]
+        return "Sorry, invalid question type!", ["Error"], None
 
-    return question, options
+    return question, options, template.get("hash")
 
 
 async def send_scheduled_question(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -232,7 +327,7 @@ async def send_scheduled_question(context: ContextTypes.DEFAULT_TYPE, chat_id: i
             return
 
         # Generate question and options
-        question, options = generate_random_question(chat_id)
+        question, options, question_hash = generate_random_question(chat_id)
 
         # Check for errors
         if options == ["Error"]:
@@ -263,6 +358,10 @@ async def send_scheduled_question(context: ContextTypes.DEFAULT_TYPE, chat_id: i
                 f"Successfully sent scheduled question to Floooooood topic in chat {chat_id}"
             )
 
+            # Mark question as asked only after successful send
+            if question_hash:
+                mark_question_as_asked(chat_id, question_hash)
+
         except TelegramError as topic_error:
             # Check if the error is related to topic not existing
             error_message = str(topic_error).lower()
@@ -287,6 +386,10 @@ async def send_scheduled_question(context: ContextTypes.DEFAULT_TYPE, chat_id: i
                 logger.info(
                     f"Successfully sent scheduled question to general chat {chat_id}"
                 )
+
+                # Mark question as asked only after successful send
+                if question_hash:
+                    mark_question_as_asked(chat_id, question_hash)
 
             else:
                 # Re-raise the error if it's not related to topic not existing
@@ -423,7 +526,7 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Generate question and options using actual participants
-    question, options = generate_random_question(chat_id)
+    question, options, question_hash = generate_random_question(chat_id)
 
     # Check for errors
     if options == ["Error"]:
@@ -438,6 +541,10 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_anonymous=False,  # Show who voted for what
         allows_multiple_answers=True,  # Only one answer per person
     )
+
+    # Mark question as asked only after successful send
+    if question_hash:
+        mark_question_as_asked(chat_id, question_hash)
 
 
 async def show_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
