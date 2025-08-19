@@ -40,11 +40,11 @@ TIMEZONE_NAME = os.getenv("TIMEZONE", "Europe/Paris")
 SCHEDULED_TIME_STR = os.getenv("SCHEDULED_TIME", "00:00")
 
 try:
-    PARIS_TZ = pytz.timezone(TIMEZONE_NAME)
+    SCHEDULE_TZ = pytz.timezone(TIMEZONE_NAME)
     logger.info(f"Using timezone: {TIMEZONE_NAME}")
 except pytz.UnknownTimeZoneError:
     logger.warning(f"Unknown timezone '{TIMEZONE_NAME}', falling back to Europe/Paris")
-    PARIS_TZ = pytz.timezone("Europe/Paris")
+    SCHEDULE_TZ = pytz.timezone("Europe/Paris")
 
 # Parse scheduled time from string (format: HH:MM or H:MM)
 try:
@@ -58,13 +58,13 @@ try:
     if not (0 <= hour <= 23) or not (0 <= minute <= 59):
         raise ValueError("Hour must be 0-23, minute must be 0-59")
 
-    SCHEDULED_TIME = time(hour, minute)
+    SCHEDULED_TIME = time(hour, minute, tzinfo=SCHEDULE_TZ)
     logger.info(f"Scheduled time set to: {SCHEDULED_TIME}")
 
 except (ValueError, IndexError) as e:
     logger.warning(f"Invalid scheduled time '{SCHEDULED_TIME_STR}': {e}")
     logger.warning("Falling back to 00:00")
-    SCHEDULED_TIME = time(0, 0)
+    SCHEDULED_TIME = time(0, 0, tzinfo=SCHEDULE_TZ)
 
 # MongoDB connection
 mongo_client = None
@@ -464,19 +464,14 @@ async def post_init(application: Application):
         )
         return
 
-    # Create a time object with timezone info for Paris
-    import datetime as dt
-
-    paris_midnight = dt.time(0, 0, tzinfo=PARIS_TZ)
-
     # Schedule daily job at 00:00 Paris time
     job_queue.run_daily(
         daily_question_job,
-        time=paris_midnight,
+        time=SCHEDULED_TIME,
         name="daily_questions",
     )
 
-    logger.info(f"Scheduled daily questions at {paris_midnight} Paris time")
+    logger.info(f"Scheduled daily questions at {SCHEDULED_TIME} Paris time")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
