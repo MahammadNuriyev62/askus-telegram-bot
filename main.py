@@ -33,9 +33,38 @@ QUESTIONS_COLLECTION = "question_templates"
 PARTICIPANTS_COLLECTION = "participants"
 ASKED_QUESTIONS_COLLECTION = "asked_questions"
 
-# Timezone configuration
-PARIS_TZ = pytz.timezone("Europe/Paris")
-SCHEDULED_TIME = time(0, 0)  # 00:00
+# Replace the existing timezone configuration section with this:
+
+# Timezone configuration from environment variables
+TIMEZONE_NAME = os.getenv("TIMEZONE", "Europe/Paris")
+SCHEDULED_TIME_STR = os.getenv("SCHEDULED_TIME", "00:00")
+
+try:
+    PARIS_TZ = pytz.timezone(TIMEZONE_NAME)
+    logger.info(f"Using timezone: {TIMEZONE_NAME}")
+except pytz.UnknownTimeZoneError:
+    logger.warning(f"Unknown timezone '{TIMEZONE_NAME}', falling back to Europe/Paris")
+    PARIS_TZ = pytz.timezone("Europe/Paris")
+
+# Parse scheduled time from string (format: HH:MM or H:MM)
+try:
+    time_parts = SCHEDULED_TIME_STR.split(":")
+    if len(time_parts) != 2:
+        raise ValueError("Time format should be HH:MM")
+
+    hour = int(time_parts[0])
+    minute = int(time_parts[1])
+
+    if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+        raise ValueError("Hour must be 0-23, minute must be 0-59")
+
+    SCHEDULED_TIME = time(hour, minute)
+    logger.info(f"Scheduled time set to: {SCHEDULED_TIME}")
+
+except (ValueError, IndexError) as e:
+    logger.warning(f"Invalid scheduled time '{SCHEDULED_TIME_STR}': {e}")
+    logger.warning("Falling back to 00:00")
+    SCHEDULED_TIME = time(0, 0)
 
 # MongoDB connection
 mongo_client = None
