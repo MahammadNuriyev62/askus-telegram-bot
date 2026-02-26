@@ -59,6 +59,20 @@ docker run -e BOT_TOKEN=<token> -e MONGODB_URI=<uri> askus-telegram-bot
 | `/unparticipate` | Leave the question game |
 | `/participants` | Show participant count |
 
+## Web Dashboard
+
+A secure web dashboard to monitor bot usage and send messages on behalf of the bot.
+
+```bash
+# Set a dashboard password (or a random one is generated)
+export DASHBOARD_PASSWORD=your-secret
+
+# Run (uses the same MONGODB_URI and BOT_TOKEN from .env)
+python dashboard.py
+```
+
+Opens on port 8050 by default (`DASHBOARD_PORT` to change). Shows active groups, participants, question history, templates, and lets you send messages as the bot.
+
 ## License
 
 MIT
